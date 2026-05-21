@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Parking IoT — ESP32</title>
+
+  <!-- Google Fonts: JetBrains Mono (monospace techy) + Outfit (clean body) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- Chart.js untuk grafik realtime -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <!-- Firebase SDK v10 (modular CDN) -->
+  <script type="module">
+    import { initializeApp }           from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { getDatabase, ref, onValue, set, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+    // =====================================================
+    //  KONFIGURASI FIREBASE — ganti dengan milik kamu
+    // =====================================================
+    const firebaseConfig = {
+      apiKey:            "YOUR_API_KEY",
+      authDomain:        "YOUR_PROJECT.firebaseapp.com",
+      databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+      projectId:         "YOUR_PROJECT",
+      storageBucket:     "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId:             "YOUR_APP_ID"
+    };
+
+    const USER_EMAIL    = "admin@smartparking.com";
+    const USER_PASSWORD = "admin123456";
+
+    // =====================================================
+    //  INIT FIREBASE
+    // =====================================================
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getDatabase(app);
+
+    // =====================================================
+    //  LOGIN FIREBASE AUTH
+    // =====================================================
+    signInWithEmailAndPassword(auth, USER_EMAIL, USER_PASSWORD)
+      .then(() => {
+        console.log("✅ Firebase Auth: Login berhasil");
+        updateFirebaseStatus(true);
+        startListeners();
+      })
+      .catch((err) => {
+        console.error("❌ Firebase Auth Error:", err.message);
+        updateFirebaseStatus(false);
+      });
+
+    // =====================================================
+    //  REALTIME LISTENERS — baca data dari Firebase
+    // =====================================================
+    function startListeners() {
+      // --- Slot parkir ---
+      onValue(ref(db, "parking/slots/available"), (snap) => {
+        const val = snap.val() ?? 0;
+        document.getElementById("val-available").textContent = val;
+        updateSlotBar(val);
+        updateStatusBadge(val);
+      });
+
+      onValue(ref(db, "parking/slots/total"), (snap) => {
+        const val = snap.val() ?? 10;
+        document.getElementById("val-total").textContent = val;
+        document.getElementById("bar-total-label").textContent = val;
+      });
+
+      // --- Sensor jarak ---
+      onValue(ref(db, "parking/sensors/distanceIn"), (snap) => {
+        const val = snap.val() ?? 0;
+        document.getElementById("val-dist-in").textContent = val + " cm";
+      });
+
+      onValue(ref(db, "parking/sensors/distanceOut"), (snap) => {
+        const val = snap.val() ?? 0;
+        document.getElementById("val-dist-out").textContent = val + " cm";
+      });
+
+      // --- Status gate ---
+      onValue(ref(db, "parking/gates/gateIn"), (snap) => {
+        const val = snap.val() ?? "CLOSED";
+        setGateUI("gate-in", val);
+      });
+
+      onValue(ref(db, "parking/gates/gateOut"), (snap) => {
+        const val = snap.val() ?? "CLOSED";
+        setGateUI("gate-out", val);
+      });
+
+      // --- Status ESP32 online ---
+      onValue(ref(db, "parking/system/online"), (snap) => {
+        const online = snap.val() === true;
+        setESPStatus(online);
+      });
+
+      // --- Timestamp last update ---
+      onValue(ref(db, "parking/system/lastUpdate"), (snap) => {
+        const ts = snap.val();
+        if (ts) {
+          const d = new Date(ts);
+          document.getElementById("val-last-update").textContent =
+            d.toLocaleTimeString("id-ID");
+        }
+      });
+
+      // --- Grafik: slot tersedia over time ---
+      onValue(ref(db, "parking/slots/available"), (snap) => {
+        const val = snap.val() ?? 0;
+        pushChartData(val);
+      });
+    }
+
+    // =====================================================
+    //  KONTROL GATE — kirim command ke Firebase
+    // =====================================================
+    window.openGateIn = function () {
+      update(ref(db, "parking/commands"), { openGateIn: true });
+      console.log("📤 Command: openGateIn = true");
+    };
+
+    window.closeGateIn = function () {
+      update(ref(db, "parking/commands"), { openGateIn: false });
+      console.log("📤 Command: openGateIn = false");
+    };
+
+    window.openGateOut = function () {
+      update(ref(db, "parking/commands"), { openGateOut: true });
+      console.log("📤 Command: openGateOut = true");
+    };
+
+    window.closeGateOut = function () {
+      update(ref(db, "parking/commands"), { openGateOut: false });
+      console.log("📤 Command: openGateOut = false");
+    };
+
+    window.resetSlots = function () {
+      const total = parseInt(document.getElementById("val-total").textContent) || 10;
+      update(ref(db, "parking/slots"), { available: total });
+      console.log("📤 Reset slot: " + total);
+    };
+
+    // =====================================================
+    //  HELPER UI
+    // =====================================================
+    function updateFirebaseStatus(ok) {
+      const el = document.getElementById("firebase-status");
+      el.textContent  = ok ? "Connected" : "Disconnected";
+      el.className    = "badge " + (ok ? "badge-green" : "badge-red");
+    }
+
+    function setESPStatus(online) {
+      const el  = document.getElementById("esp-status");
+      const dot = document.getElementById("esp-dot");
+      el.textContent  = online ? "Online" : "Offline";
+      el.className    = "badge " + (online ? "badge-green" : "badge-red");
+      dot.className   = "status-dot " + (online ? "dot-green" : "dot-red");
+    }
+
+    function setGateUI(id, status) {
+      const badge = document.getElementById(id + "-badge");
+      const isOpen = status === "OPEN";
+      badge.textContent = isOpen ? "OPEN" : "CLOSED";
+      badge.className   = "gate-badge " + (isOpen ? "gate-open" : "gate-closed");
+    }
+
+    function updateStatusBadge(available) {
+      const el    = document.getElementById("parking-status-badge");
+      const total = parseInt(document.getElementById("val-total").textContent) || 10;
+      if (available === 0) {
+        el.textContent = "PENUH";
+        el.className   = "status-pill pill-red";
+        document.getElementById("val-available").style.color = "var(--red)";
+      } else if (available < Math.ceil(total * 0.3)) {
+        el.textContent = "HAMPIR PENUH";
+        el.className   = "status-pill pill-yellow";
+        document.getElementById("val-available").style.color = "var(--yellow)";
+      } else {
+        el.textContent = "TERSEDIA";
+        el.className   = "status-pill pill-green";
+        document.getElementById("val-available").style.color = "var(--green)";
+      }
+    }
+
+    function updateSlotBar(available) {
+      const total    = parseInt(document.getElementById("val-total").textContent) || 10;
+      const used     = total - available;
+      const pct      = (used / total) * 100;
+      const bar      = document.getElementById("slot-bar-fill");
+      bar.style.width = pct + "%";
+      bar.style.background = pct >= 100 ? "var(--red)" : pct >= 70 ? "var(--yellow)" : "var(--green)";
+      document.getElementById("slot-used-label").textContent = used;
+    }
+  </script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ============================================================
+       HEADER
+  ============================================================ -->
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="header-left">
+        <span class="header-logo">SP</span>
+        <div>
+          <h1 class="header-title">Smart Parking IoT</h1>
+          <p class="header-sub">ESP32 · Firebase Realtime Database</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <span class="status-dot dot-red" id="esp-dot"></span>
+        <span class="badge badge-red" id="esp-status">Offline</span>
+        <span class="badge badge-red" id="firebase-status">Disconnected</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- ============================================================
+         ROW 1 — 4 KARTU MONITORING
+    ============================================================ -->
+    <section class="grid-4">
+
+      <!-- Slot Tersedia -->
+      <div class="card card-highlight">
+        <p class="card-label">Slot Tersedia</p>
+        <p class="card-value big-value" id="val-available">—</p>
+        <span class="status-pill pill-green" id="parking-status-badge">—</span>
+      </div>
+
+      <!-- Total Slot -->
+      <div class="card">
+        <p class="card-label">Total Slot</p>
+        <p class="card-value" id="val-total">—</p>
+        <p class="card-sub">kapasitas parkir</p>
+      </div>
+
+      <!-- Sensor Masuk -->
+      <div class="card">
+        <p class="card-label">Sensor Masuk</p>
+        <p class="card-value" id="val-dist-in">— cm</p>
+        <p class="card-sub">HC-SR04 · GPIO 25/26</p>
+      </div>
+
+      <!-- Sensor Keluar -->
+      <div class="card">
+        <p class="card-label">Sensor Keluar</p>
+        <p class="card-value" id="val-dist-out">— cm</p>
+        <p class="card-sub">HC-SR04 · GPIO 27/14</p>
+      </div>
+
+    </section>
+
+    <!-- ============================================================
+         ROW 2 — SLOT BAR + GATE STATUS + KONTROL
+    ============================================================ -->
+    <section class="grid-3">
+
+      <!-- Kapasitas Bar -->
+      <div class="card card-wide">
+        <p class="card-label">Kapasitas Parkir</p>
+        <div class="slot-bar-wrap">
+          <div class="slot-bar-track">
+            <div class="slot-bar-fill" id="slot-bar-fill"></div>
+          </div>
+          <div class="slot-bar-labels">
+            <span>0</span>
+            <span id="bar-total-label">10</span>
+          </div>
+        </div>
+        <p class="slot-bar-info">
+          <span id="slot-used-label">0</span> terpakai dari <span id="val-total-2" class="mirror-total">?</span> slot
+        </p>
+      </div>
+
+      <!-- Status Gate -->
+      <div class="card">
+        <p class="card-label">Status Gate</p>
+        <div class="gate-row">
+          <div class="gate-item">
+            <span class="gate-label">Gate Masuk</span>
+            <span class="gate-badge gate-closed" id="gate-in-badge">CLOSED</span>
+          </div>
+          <div class="gate-divider"></div>
+          <div class="gate-item">
+            <span class="gate-label">Gate Keluar</span>
+            <span class="gate-badge gate-closed" id="gate-out-badge">CLOSED</span>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============================================================
+         ROW 3 — KONTROL GATE
+    ============================================================ -->
+    <section class="grid-2">
+
+      <!-- Kontrol Gate Masuk -->
+      <div class="card">
+        <p class="card-label">Kontrol Gate Masuk</p>
+        <p class="card-sub" style="margin-bottom:1rem">Servo · GPIO 18</p>
+        <div class="btn-group">
+          <button class="btn btn-green" onclick="openGateIn()">Buka</button>
+          <button class="btn btn-red"   onclick="closeGateIn()">Tutup</button>
+        </div>
+      </div>
+
+      <!-- Kontrol Gate Keluar -->
+      <div class="card">
+        <p class="card-label">Kontrol Gate Keluar</p>
+        <p class="card-sub" style="margin-bottom:1rem">Servo · GPIO 19</p>
+        <div class="btn-group">
+          <button class="btn btn-green" onclick="openGateOut()">Buka</button>
+          <button class="btn btn-red"   onclick="closeGateOut()">Tutup</button>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============================================================
+         ROW 4 — GRAFIK REALTIME
+    ============================================================ -->
+    <section class="grid-1">
+      <div class="card">
+        <div class="card-header-row">
+          <p class="card-label">Grafik Slot Tersedia — Realtime</p>
+          <button class="btn btn-ghost btn-sm" onclick="clearChart()">Reset Graf</button>
+        </div>
+        <canvas id="slotChart" height="80"></canvas>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         ROW 5 — INFO SISTEM + RESET
+    ============================================================ -->
+    <section class="grid-2">
+
+      <!-- Info Sistem -->
+      <div class="card">
+        <p class="card-label">Informasi Sistem</p>
+        <table class="info-table">
+          <tr><td>Mikrokontroler</td><td>ESP32 DevKit</td></tr>
+          <tr><td>Sensor Jarak</td><td>HC-SR04 × 2</td></tr>
+          <tr><td>Aktuator</td><td>Servo SG90 × 2</td></tr>
+          <tr><td>Display</td><td>OLED SSD1306 I2C</td></tr>
+          <tr><td>Database</td><td>Firebase RTDB</td></tr>
+          <tr><td>Update Terakhir</td><td id="val-last-update">—</td></tr>
+        </table>
+      </div>
+
+      <!-- Reset + Keterangan -->
+      <div class="card">
+        <p class="card-label">Manajemen Slot</p>
+        <p class="card-sub" style="margin-bottom:1.2rem">
+          Reset jumlah slot tersedia ke nilai total. Gunakan jika data tidak sinkron dengan kondisi fisik.
+        </p>
+        <button class="btn btn-yellow btn-full" onclick="resetSlots()">Reset Slot Parkir</button>
+        <div class="legend-wrap">
+          <div class="legend-item"><span class="dot dot-green"></span>Tersedia (&gt;30%)</div>
+          <div class="legend-item"><span class="dot dot-yellow"></span>Hampir Penuh (&lt;30%)</div>
+          <div class="legend-item"><span class="dot dot-red"></span>Penuh (0 slot)</div>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <p>Smart Parking IoT · ESP32 + Firebase · <span id="footer-year"></span></p>
+  </footer>
+
+  <script src="app.js"></script>
+  <script>
+    // Isi tahun footer otomatis
+    document.getElementById("footer-year").textContent = new Date().getFullYear();
+
+    // Mirror total slot ke card kapasitas
+    const observer = new MutationObserver(() => {
+      const v = document.getElementById("val-total").textContent;
+      document.getElementById("val-total-2").textContent = v;
+    });
+    observer.observe(document.getElementById("val-total"), { childList: true });
+  </script>
+</body>
+</html>
